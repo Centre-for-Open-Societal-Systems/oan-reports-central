@@ -26,11 +26,12 @@ api:
     gateway: ""
   upstreamAuth:
     # Staff realm, the issuer the dashboard-apis trust (oan-helm environments/dev/values/*.yaml).
-    # Left off until the Keycloak client and its Secret exist: set tokenUrl, clientId and existingSecret together.
-    #   tokenUrl: https://keycloak.development.oanstaging.com/realms/staff/protocol/openid-connect/token
-    tokenUrl: ""
-    clientId: ""
-    existingSecret: ""
+    # Client oan-reports-central: confidential, service account only, holding charts:read on
+    # farmer-registry-dashboard-api, cropsown-registry-dashboard-api and livestock-registry-dashboard-api,
+    # so its tokens name all three in `aud`. Its secret is reports/oan-reports-central-upstream-client.
+    tokenUrl: https://keycloak.development.oanstaging.com/realms/staff/protocol/openid-connect/token
+    clientId: oan-reports-central
+    existingSecret: oan-reports-central-upstream-client
 
 web:
   image:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any
 
 import httpx
@@ -25,6 +27,40 @@ def _base_for(service: str, settings: Settings) -> str:
         "gateway": settings.upstream_gateway_base_url,
     }
     return (mapping.get(service) or "").rstrip("/")
+
+
+# Client-credentials token for the upstreams in UPSTREAM_AUTH_SERVICES, cached until shortly before expiry.
+_token_cache: dict[str, Any] = {"key": None, "token": None, "expires_at": 0.0}
+_token_lock = asyncio.Lock()
+
+
+def _needs_token(service: str, settings: Settings) -> bool:
+    return bool(settings.oidc_token_url) and service in settings.upstream_auth_service_list
+
+
+async def _access_token(settings: Settings, *, force: bool = False) -> str:
+    key = (settings.oidc_token_url, settings.oidc_client_id)
+    async with _token_lock:
+        if not force and _token_cache["key"] == key and _token_cache["token"] and time.monotonic() < _token_cache["expires_at"]:
+            return _token_cache["token"]
+        async with httpx.AsyncClient(timeout=settings.upstream_timeout_seconds) as client:
+            res = await client.post(
+                settings.oidc_token_url,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": settings.oidc_client_id,
+                    "client_secret": settings.oidc_client_secret,
+                },
+            )
+        if res.status_code >= 400:
+            raise UpstreamError(f"token endpoint HTTP {res.status_code}: {res.text[:200]}", status_code=res.status_code)
+        body = res.json()
+        token = body.get("access_token")
+        if not token:
+            raise UpstreamError("token endpoint returned no access_token")
+        lifetime = float(body.get("expires_in") or 60)
+        _token_cache.update(key=key, token=token, expires_at=time.monotonic() + max(lifetime - 30, 5))
+        return token
 
 
 def unwrap_chart_payload(payload: Any) -> list[dict] | dict | Any:
@@ -83,8 +119,14 @@ async def fetch_chart(
 
     meta["url"] = url
     try:
+        auth = _needs_token(service, settings)
+        headers = {"Authorization": f"Bearer {await _access_token(settings)}"} if auth else {}
         async with httpx.AsyncClient(timeout=settings.upstream_timeout_seconds) as client:
-            res = await client.get(url, params=params or {})
+            res = await client.get(url, params=params or {}, headers=headers)
+            if auth and res.status_code == 401:
+                # Token revoked or the signing key rotated: fetch a fresh one once.
+                headers = {"Authorization": f"Bearer {await _access_token(settings, force=True)}"}
+                res = await client.get(url, params=params or {}, headers=headers)
         if res.status_code >= 400:
             meta["error"] = f"HTTP {res.status_code}: {res.text[:300]}"
             meta["status_code"] = res.status_code
